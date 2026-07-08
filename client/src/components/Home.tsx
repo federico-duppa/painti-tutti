@@ -38,8 +38,8 @@ export function Home({ urlCode, onJoined, onError }: Props) {
   return (
     <main className="home">
       <p className="tagline">
-        A paint hide &amp; seek game. Everyone paints the secret word on one shared canvas —
-        except the impostor, who doesn't know it. Find them. No downloads, no sign-up.
+        Paint-to-camouflage hide &amp; seek. Hiders paint their own body to melt into the
+        scenery; seekers hunt them down. Straight from the browser — no downloads, no sign-up.
       </p>
       <label>
         Your name

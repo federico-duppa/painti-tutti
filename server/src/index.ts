@@ -14,6 +14,8 @@ const httpServer = createServer(app);
 const io = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer, {
   // Same-origin in production; the Vite dev server proxies /socket.io in dev.
   cors: { origin: true },
+  // Stroke bursts are small; default limits are fine. Textures can never be
+  // uploaded — the protocol simply has no event for them.
 });
 
 // In production the server serves the built client so one process hosts everything.
@@ -25,7 +27,11 @@ app.get('*', (_req, res) => {
   });
 });
 
-const rooms = new RoomManager();
+// Env overrides make automated playtests practical (short rounds).
+const rooms = new RoomManager({
+  hideSeconds: process.env.HIDE_SECONDS ? Number(process.env.HIDE_SECONDS) : undefined,
+  seekSeconds: process.env.SEEK_SECONDS ? Number(process.env.SEEK_SECONDS) : undefined,
+});
 
 interface SocketData {
   room: Room | null;
@@ -33,21 +39,36 @@ interface SocketData {
 
 type GameSocket = Socket<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>;
 
-function broadcast(room: Room) {
+function socketOf(playerId: string) {
+  return io.sockets.sockets.get(playerId);
+}
+
+function broadcastState(room: Room) {
+  const now = Date.now();
   for (const player of room.players) {
-    io.sockets.sockets.get(player.id)?.emit('room:state', room.stateFor(player.id));
+    socketOf(player.id)?.emit('room:state', room.stateFor(player.id, now));
   }
 }
 
-/** Run a game action; on success broadcast the new state, on failure tell only the actor. */
-function act(socket: GameSocket, room: Room | null, result: () => ActionResult) {
+/** Send every paint job `viewer` is allowed to see (used on phase changes). */
+function sendVisiblePaint(room: Room, viewerId: string) {
+  const payload = room.players
+    .filter((p) => p.role === 'hider' && room.canSeePaint(viewerId, p.id))
+    .map((p) => ({ playerId: p.id, strokes: room.strokesOf(p.id) }));
+  socketOf(viewerId)?.emit('paint:all', payload);
+}
+
+function act(socket: GameSocket, room: Room | null, action: () => ActionResult) {
   if (!room) {
     socket.emit('room:error', 'You are not in a room');
-    return;
+    return false;
   }
-  const res = result();
-  if (res.ok) broadcast(room);
-  else socket.emit('room:error', res.error);
+  const res = action();
+  if (!res.ok) {
+    socket.emit('room:error', res.error);
+    return false;
+  }
+  return true;
 }
 
 io.on('connection', (socket: GameSocket) => {
@@ -63,7 +84,7 @@ io.on('connection', (socket: GameSocket) => {
     }
     socket.data.room = room;
     ack({ ok: true, code: room.code });
-    broadcast(room);
+    broadcastState(room);
   });
 
   socket.on('room:join', ({ code, name }, ack) => {
@@ -74,52 +95,109 @@ io.on('connection', (socket: GameSocket) => {
     if (!res.ok) return ack(res);
     socket.data.room = room;
     ack({ ok: true });
-    socket.emit('strokes:all', room.strokes);
-    broadcast(room);
+    broadcastState(room);
   });
 
   socket.on('game:start', () => {
     const room = socket.data.room;
-    act(socket, room, () => room!.start(socket.id));
-    if (room?.phase === 'painting') io.to([...room.players.map((p) => p.id)]).emit('strokes:all', []);
+    if (act(socket, room, () => room!.start(socket.id, Date.now()))) {
+      broadcastState(room!);
+      for (const p of room!.players) sendVisiblePaint(room!, p.id);
+    }
   });
 
   socket.on('game:again', () => {
-    act(socket, socket.data.room, () => socket.data.room!.backToLobby(socket.id));
+    const room = socket.data.room;
+    if (act(socket, room, () => room!.backToLobby(socket.id))) broadcastState(room!);
   });
 
-  socket.on('stroke:add', ({ points }) => {
+  socket.on('move:update', ({ pos, yaw }) => {
+    const room = socket.data.room;
+    if (!room) return;
+    const res = room.moveTo(socket.id, pos, Number(yaw));
+    if (!res.ok) return; // movement is high-frequency; drop silently
+    const me = room.players.find((p) => p.id === socket.id)!;
+    for (const p of room.players) {
+      if (p.id !== socket.id && room.canSeePosition(p.id, socket.id)) {
+        socketOf(p.id)?.emit('player:moved', { id: me.id, pos: me.pos, yaw: me.yaw, pose: me.pose });
+      }
+    }
+  });
+
+  socket.on('pose:set', ({ pose }) => {
+    const room = socket.data.room;
+    if (act(socket, room, () => room!.setPose(socket.id, pose))) {
+      const me = room!.players.find((p) => p.id === socket.id)!;
+      for (const p of room!.players) {
+        if (room!.canSeePosition(p.id, socket.id)) {
+          socketOf(p.id)?.emit('player:moved', { id: me.id, pos: me.pos, yaw: me.yaw, pose: me.pose });
+        }
+      }
+    }
+  });
+
+  socket.on('paint:stroke', ({ stroke }) => {
     const room = socket.data.room;
     if (!room) return socket.emit('room:error', 'You are not in a room');
-    const res = room.addStroke(socket.id, points);
+    const res = room.addStroke(socket.id, stroke, Date.now());
     if (!res.ok) return socket.emit('room:error', res.error);
-    const stroke = room.strokes[room.strokes.length - 1];
-    for (const player of room.players) {
-      io.sockets.sockets.get(player.id)?.emit('stroke:added', stroke);
+    const stored = room.strokesOf(socket.id).at(-1)!;
+    for (const p of room.players) {
+      if (room.canSeePaint(p.id, socket.id)) {
+        socketOf(p.id)?.emit('paint:stroke', { playerId: socket.id, stroke: stored });
+      }
     }
-    broadcast(room);
   });
 
-  socket.on('turn:skip', () => {
-    act(socket, socket.data.room, () => socket.data.room!.skipTurn(socket.id));
+  socket.on('paint:undo', () => {
+    const room = socket.data.room;
+    if (act(socket, room, () => room!.undoStroke(socket.id))) {
+      for (const p of room!.players) {
+        if (room!.canSeePaint(p.id, socket.id)) {
+          socketOf(p.id)?.emit('paint:undo', { playerId: socket.id });
+        }
+      }
+    }
   });
 
-  socket.on('vote:cast', ({ targetId }) => {
-    act(socket, socket.data.room, () => socket.data.room!.castVote(socket.id, String(targetId ?? '')));
-  });
-
-  socket.on('guess:submit', ({ word }) => {
-    act(socket, socket.data.room, () => socket.data.room!.submitGuess(socket.id, String(word ?? '')));
+  socket.on('tag:attempt', ({ targetId }) => {
+    const room = socket.data.room;
+    if (!room) return socket.emit('room:error', 'You are not in a room');
+    const res = room.tagAttempt(socket.id, targetId ? String(targetId) : null, Date.now());
+    if (!res.ok) return socket.emit('room:error', res.error);
+    for (const p of room.players) {
+      socketOf(p.id)?.emit('tag:result', {
+        seekerId: socket.id,
+        targetId: res.targetId,
+        hit: res.hit,
+        hidersLeft: res.hidersLeft,
+      });
+    }
+    broadcastState(room); // cooldowns, eliminations, possible round end
   });
 
   socket.on('disconnect', () => {
     const room = socket.data.room;
     if (!room) return;
-    room.removePlayer(socket.id);
+    room.removePlayer(socket.id, Date.now());
     rooms.removeIfEmpty(room);
-    broadcast(room);
+    broadcastState(room);
   });
 });
+
+// Drive phase timers: hiding → seeking → (timeout) hiders win.
+setInterval(() => {
+  const now = Date.now();
+  for (const room of rooms.all()) {
+    if (room.tick(now)) {
+      broadcastState(room);
+      // Entering `seeking` reveals hider paint/positions to seekers.
+      if (room.phase === 'seeking') {
+        for (const p of room.players) sendVisiblePaint(room, p.id);
+      }
+    }
+  }
+}, 300);
 
 httpServer.listen(PORT, () => {
   console.log(`painti-tutti server listening on http://localhost:${PORT}`);

@@ -1,52 +1,65 @@
-export type Phase = 'lobby' | 'painting' | 'voting' | 'guessing' | 'reveal';
+export type Phase = 'lobby' | 'hiding' | 'seeking' | 'roundEnd';
+export type Role = 'seeker' | 'hider';
+export type PoseId = 'stand' | 'crouch' | 'sit' | 'lie' | 'armsUp';
+
+export const POSES: PoseId[] = ['stand', 'crouch', 'sit', 'lie', 'armsUp'];
+
+export type Vec3 = [number, number, number];
+
+/**
+ * One brush stroke on a hider's own body, in the UV space (0..1) of their
+ * 512x512 body texture atlas. Paint exists ONLY as stroke events — there is
+ * deliberately no way to upload a texture, so disguises must be hand-made
+ * in-session.
+ */
+export interface PaintStroke {
+  points: [number, number][];
+  /** #rrggbb */
+  color: string;
+  /** brush diameter in texels */
+  size: number;
+}
 
 export interface PublicPlayer {
   id: string;
   name: string;
-  color: string;
   isHost: boolean;
   connected: boolean;
   score: number;
-  hasVoted: boolean;
+  /** null while in the lobby (roles are assigned at round start) */
+  role: Role | null;
+  alive: boolean;
+  /** null when this viewer is not allowed to see the player's position */
+  pos: Vec3 | null;
+  yaw: number;
+  pose: PoseId;
 }
 
-/** A single continuous brush stroke. Coordinates are normalized to 0..1. */
-export interface Stroke {
-  playerId: string;
-  color: string;
-  /** [x, y] pairs, 0..1 relative to the square canvas. */
-  points: [number, number][];
-}
-
-export interface RevealInfo {
-  impostorId: string;
-  word: string;
-  category: string;
-  accusedId: string | null;
-  impostorGuess: string | null;
-  winner: 'painters' | 'impostor';
+export interface RoundResult {
+  winner: 'seekers' | 'hiders';
   reason: string;
+  /** ids of hiders still alive at round end */
+  survivors: string[];
 }
 
 /** Snapshot of a room as seen by one specific player. */
 export interface RoomStateForPlayer {
   code: string;
   phase: Phase;
+  round: number;
   players: PublicPlayer[];
   you: {
     id: string;
-    isImpostor: boolean;
-    /** Everyone sees the category. */
-    category: string | null;
-    /** null for the impostor until reveal. */
-    word: string | null;
+    role: Role | null;
+    alive: boolean;
+    /** server timestamp (ms) before which this seeker cannot tag again */
+    nextTagAt: number;
   };
-  /** Player whose turn it is to paint, when phase === 'painting'. */
-  currentPainterId: string | null;
-  /** 1-based stroke turn counter, e.g. turn 3 of 8. */
-  turnNumber: number | null;
-  totalTurns: number | null;
-  reveal: RevealInfo | null;
+  /** server timestamp (ms) when the current phase ends, if timed */
+  phaseEndsAt: number | null;
+  /** server clock at snapshot time, for client countdown offset */
+  serverNow: number;
+  result: RoundResult | null;
 }
 
 export interface ClientToServerEvents {
@@ -60,35 +73,46 @@ export interface ClientToServerEvents {
   ) => void;
   'game:start': () => void;
   'game:again': () => void;
-  'stroke:add': (payload: { points: [number, number][] }) => void;
-  'turn:skip': () => void;
-  'vote:cast': (payload: { targetId: string }) => void;
-  'guess:submit': (payload: { word: string }) => void;
+  'move:update': (payload: { pos: Vec3; yaw: number }) => void;
+  'pose:set': (payload: { pose: PoseId }) => void;
+  'paint:stroke': (payload: { stroke: PaintStroke }) => void;
+  'paint:undo': () => void;
+  /** targetId null = shot into the environment (still costs cooldown) */
+  'tag:attempt': (payload: { targetId: string | null }) => void;
 }
 
 export interface ServerToClientEvents {
   'room:state': (state: RoomStateForPlayer) => void;
-  'stroke:added': (stroke: Stroke) => void;
-  'strokes:all': (strokes: Stroke[]) => void;
+  'player:moved': (payload: { id: string; pos: Vec3; yaw: number; pose: PoseId }) => void;
+  'paint:stroke': (payload: { playerId: string; stroke: PaintStroke }) => void;
+  'paint:undo': (payload: { playerId: string }) => void;
+  'paint:all': (payload: { playerId: string; strokes: PaintStroke[] }[]) => void;
+  'tag:result': (payload: {
+    seekerId: string;
+    targetId: string | null;
+    hit: boolean;
+    hidersLeft: number;
+  }) => void;
   'room:error': (message: string) => void;
 }
 
-export const MIN_PLAYERS = 3;
-export const MAX_PLAYERS = 12;
-export const STROKES_PER_PLAYER = 2;
-export const MAX_NAME_LENGTH = 20;
+export const MIN_PLAYERS = 2;
+export const MAX_PLAYERS = 10;
 
-export const PLAYER_COLORS = [
-  '#e6194b',
-  '#3cb44b',
-  '#4363d8',
-  '#f58231',
-  '#911eb4',
-  '#46f0f0',
-  '#f032e6',
-  '#bcf60c',
-  '#008080',
-  '#9a6324',
-  '#800000',
-  '#000075',
-];
+/** Phase durations (seconds). The server can override via env for testing. */
+export const HIDE_SECONDS = 75;
+export const SEEK_SECONDS = 240;
+
+export const TEXTURE_SIZE = 512;
+export const MAX_STROKE_POINTS = 300;
+export const MAX_STROKES_PER_PLAYER = 1500;
+/** stroke-event rate limit: at most this many strokes per rolling window */
+export const STROKE_WINDOW_MS = 5000;
+export const STROKE_WINDOW_MAX = 60;
+
+export const TAG_RANGE = 9;
+export const TAG_HIT_COOLDOWN_MS = 1200;
+/** wrong guesses hurt: spamming clicks at every wall must not be optimal */
+export const TAG_MISS_COOLDOWN_MS = 4000;
+
+export const MAX_NAME_LENGTH = 20;

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { RoomStateForPlayer, Stroke } from '../../shared/src';
+import type { RoomStateForPlayer } from '../../shared/src';
 import { socket } from './socket';
 import { Home } from './components/Home';
 import { Lobby } from './components/Lobby';
@@ -12,25 +12,20 @@ function codeFromUrl(): string | null {
 
 export function App() {
   const [room, setRoom] = useState<RoomStateForPlayer | null>(null);
-  const [strokes, setStrokes] = useState<Stroke[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    socket.on('room:state', setRoom);
-    socket.on('strokes:all', setStrokes);
-    socket.on('stroke:added', (stroke) => setStrokes((prev) => [...prev, stroke]));
-    socket.on('room:error', setError);
-    socket.on('disconnect', () => {
+    const onDisconnect = () => {
       setRoom(null);
-      setStrokes([]);
       setError('Connection lost — refresh to rejoin.');
-    });
+    };
+    socket.on('room:state', setRoom);
+    socket.on('room:error', setError);
+    socket.on('disconnect', onDisconnect);
     return () => {
       socket.off('room:state', setRoom);
-      socket.off('strokes:all', setStrokes);
-      socket.removeAllListeners('stroke:added');
       socket.off('room:error', setError);
-      socket.removeAllListeners('disconnect');
+      socket.off('disconnect', onDisconnect);
     };
   }, []);
 
@@ -40,32 +35,22 @@ export function App() {
     return () => clearTimeout(t);
   }, [error]);
 
-  // Strokes reset when a new round starts.
-  useEffect(() => {
-    if (room?.phase === 'painting' && room.turnNumber === 1) setStrokes([]);
-  }, [room?.phase, room?.turnNumber]);
-
   const onJoined = (code: string) => {
     window.history.pushState({}, '', `/room/${code}`);
   };
 
-  let screen;
-  if (!room) {
-    screen = <Home urlCode={codeFromUrl()} onJoined={onJoined} onError={setError} />;
-  } else if (room.phase === 'lobby') {
-    screen = <Lobby room={room} />;
-  } else {
-    screen = <GameView room={room} strokes={strokes} />;
-  }
+  const inGame = room && room.phase !== 'lobby';
 
   return (
-    <div className="app">
+    <div className={inGame ? 'app app-game' : 'app'}>
       <header>
         <h1>🎨 Painti Tutti</h1>
         {room && <span className="room-code">Room {room.code}</span>}
       </header>
       {error && <div className="toast">{error}</div>}
-      {screen}
+      {!room && <Home urlCode={codeFromUrl()} onJoined={onJoined} onError={setError} />}
+      {room && room.phase === 'lobby' && <Lobby room={room} />}
+      {inGame && <GameView room={room} />}
     </div>
   );
 }

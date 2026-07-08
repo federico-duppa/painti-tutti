@@ -38,20 +38,20 @@ export function Lobby({ room }: { room: RoomStateForPlayer }) {
         >
           {room.players.length < MIN_PLAYERS
             ? `Waiting for players (${room.players.length}/${MIN_PLAYERS} minimum)`
-            : 'Start game'}
+            : 'Start round'}
         </button>
       ) : (
-        <p className="hint">Waiting for the host to start the game…</p>
+        <p className="hint">Waiting for the host to start the round…</p>
       )}
 
       <details className="rules">
         <summary>How to play</summary>
         <ol>
-          <li>Everyone secretly receives the same word — except one <strong>impostor</strong>, who only sees the category.</li>
-          <li>In turns, each player adds <strong>one brush stroke</strong> to the shared canvas (two turns each).</li>
-          <li>Paint enough to prove you know the word, but not so much that the impostor figures it out!</li>
-          <li>After painting, everyone votes on who the impostor is. Talk it out on your call!</li>
-          <li>If caught, the impostor can still steal the win by guessing the word.</li>
+          <li>Players are split into <strong>seekers</strong> 🔍 and <strong>hiders</strong> 🫥 (about 1 seeker per 4 hiders).</li>
+          <li>Hiders spawn as blank white figures in a colorful courtyard. During the hiding phase, walk anywhere, <strong>paint your own body</strong> to match your surroundings (the eyedropper samples any color in the scene), and lock a pose.</li>
+          <li>Seekers can't watch the hiding phase. When it ends, hiders freeze and seekers hunt in first person.</li>
+          <li>Seekers click a figure to tag it — but wrong guesses cost a long cooldown, so don't spray-click the walls.</li>
+          <li>Seekers win by finding everyone; hiders win if <strong>anyone</strong> survives the clock.</li>
         </ol>
       </details>
     </main>
